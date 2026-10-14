@@ -251,6 +251,9 @@ def evaluate(doc, item, state, ctx):
         ok_flag, reason = should_alert(dstate, state, remain, prev)
         if ok_flag:
             title, desp = build_message(doc, remain, detail_block)
+            if ctx["forced"]:
+                title = "【测试勿抢】" + title   # 伪造数据, 标题必须明示, 防止误导
+                desp = "> ⚠️ 本条为**链路测试**（强制伪造号源），非真实号源。\n\n" + desp
             if ctx["skip_push"]:
                 log("[SKIP_PUSH] 模拟推送: %s" % title)
                 ok = True
