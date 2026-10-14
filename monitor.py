@@ -42,8 +42,7 @@ def _env_int(name, default):
     except Exception:
         return default
 
-COOLDOWN_MIN = _env_int("ALERT_COOLDOWN_MIN", 15)  # 同一医生两次推送最小间隔(分钟)
-RE_REMIND_MIN = _env_int("RE_REMIND_MIN", 30)      # 持续有号时的续报间隔(分钟)
+COOLDOWN_MIN = _env_int("ALERT_COOLDOWN_MIN", 15)  # 上升沿连报最小间隔(防接口抖动,分钟)
 DAILY_CAP = _env_int("DAILY_PUSH_CAP", 5)          # 每日推送总上限(Server酱免费版=5条/天)
 
 # ---------- 基础工具 ----------
@@ -212,24 +211,25 @@ def fetch_clinic_detail(doc_id):
     return None
 
 # ---------- 报警判定 ----------
+# 优化策略：仅在 remainnum 从 0 跳到有号（上升沿 = 新放号 / 新退号）时提醒；
+# 号源持续挂着（remain>0 且 prev>0）不再续报，避免浪费方糖每日 5 条免费额度。
 def should_alert(dstate, state, remain, prev):
     if state["daily"].get("date") != today_str():          # 北京时间每日 0 点重置
         state["daily"] = {"date": today_str(), "sent": 0}
     if state["daily"].get("sent", 0) >= DAILY_CAP:
         return False, "达到每日推送上限 %d 条(Server酱免费额度)" % DAILY_CAP
-    first_time = (not dstate.get("alerted")) or prev == 0   # 新出现的一轮有号
-    last_ts = dstate.get("last_alert_ts")
-    gap = None
-    if last_ts:
-        try:
-            gap = (now_bjt() - datetime.fromisoformat(last_ts)).total_seconds() / 60
-        except Exception:
-            gap = None
-    if first_time:
-        return True, "首次发现有号"
-    if gap is not None and gap < max(COOLDOWN_MIN, RE_REMIND_MIN):
-        return False, "冷却中(距上次 %.1f 分钟)" % gap
-    return True, "持续有号续报(距上次 %.0f 分钟)" % (gap or 0)
+    if prev == 0 and remain > 0:                          # 上升沿：新放号 / 新退号
+        last_ts = dstate.get("last_alert_ts")
+        gap = None
+        if last_ts:
+            try:
+                gap = (now_bjt() - datetime.fromisoformat(last_ts)).total_seconds() / 60
+            except Exception:
+                gap = None
+        if gap is not None and gap < COOLDOWN_MIN:         # 防接口抖动导致的 0→1→0→1 连报
+            return False, "上升沿冷却中(距上次 %.1f 分钟)" % gap
+        return True, "新放号/退号(0→%d)" % remain
+    return False, "非上升沿(持续有号不重复提醒)"
 
 # ---------- 单个医生的判定与动作 ----------
 def evaluate(doc, item, state, ctx):
