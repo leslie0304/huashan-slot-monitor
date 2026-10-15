@@ -2,7 +2,8 @@ name: huashan-slot-monitor
 
 on:
   schedule:
-    - cron: '2-59/5 * * * *'
+    - cron: '17 */4 * * *'
+    - cron: '43 2-23/4 * * *'
   workflow_dispatch:
     inputs:
       force_remain:
@@ -24,12 +25,14 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
       - name: Restore monitor state
         uses: actions/cache@v4
         with:
@@ -37,13 +40,32 @@ jobs:
           key: huashan-state-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             huashan-state-
-      - name: Run monitor
+
+      - name: Run monitor loop (~5.5h, check every 5 min)
         env:
           SERVERCHAN_SENDKEY: ${{ secrets.SERVERCHAN_SENDKEY }}
           FORCE_REMAIN: ${{ github.event.inputs.force_remain }}
           SKIP_PUSH: ${{ github.event.inputs.skip_push || 'false' }}
           TZ: Asia/Shanghai
-        run: python monitor.py
+        run: |
+          START=$(date +%s)
+          RUN_MIN=330
+          while true; do
+            python monitor.py
+            rc=$?
+            if [ "$rc" -eq 3 ]; then
+              echo "::error::结构性错误，终止循环"
+              exit 3
+            fi
+            NOW=$(date +%s)
+            ELAPSED=$(( (NOW - START) / 60 ))
+            if [ "$ELAPSED" -ge "$RUN_MIN" ]; then
+              echo "循环已达 ${RUN_MIN} 分钟，本轮结束"
+              break
+            fi
+            sleep 300
+          done
+
       - name: Show state
         if: always()
         run: cat state.json 2>/dev/null || echo "(no state.json)"
