@@ -105,8 +105,12 @@ def to_int(v):
     return None
 
 # ---------- state ----------
+def default_daily():
+    return {"date": today_str(), "sent": 0, "w_morning": 0, "w_afternoon": 0,
+            "hb_noon": False, "hb_evening": False}
+
 def default_state():
-    return {"version": 1, "doctors": {}, "daily": {"date": today_str(), "sent": 0},
+    return {"version": 1, "doctors": {}, "daily": default_daily(),
             "last_check_ts": None}
 
 def load_state():
@@ -116,7 +120,7 @@ def load_state():
         if not isinstance(s, dict):
             raise ValueError("state 不是 object")
         s.setdefault("doctors", {})
-        s.setdefault("daily", {"date": today_str(), "sent": 0})
+        s.setdefault("daily", default_daily())
         return s
     except Exception as e:
         log("state 加载失败, 使用默认值: %s" % e, "WARN")
@@ -215,7 +219,7 @@ def fetch_clinic_detail(doc_id):
 # 号源持续挂着（remain>0 且 prev>0）不再续报，避免浪费方糖每日 5 条免费额度。
 def should_alert(dstate, state, remain, prev):
     if state["daily"].get("date") != today_str():          # 北京时间每日 0 点重置
-        state["daily"] = {"date": today_str(), "sent": 0}
+        state["daily"] = default_daily()
     if state["daily"].get("sent", 0) >= DAILY_CAP:
         return False, "达到每日推送上限 %d 条(Server酱免费额度)" % DAILY_CAP
     if prev == 0 and remain > 0:                          # 上升沿：新放号 / 新退号
@@ -264,6 +268,11 @@ def evaluate(doc, item, state, ctx):
                 dstate["alerted"] = True
                 dstate["last_alert_ts"] = now_bjt().isoformat()
                 state["daily"]["sent"] = state["daily"].get("sent", 0) + 1
+                _h = now_bjt().hour
+                if _h < 12:
+                    state["daily"]["w_morning"] = state["daily"].get("w_morning", 0) + 1
+                elif _h < 18:
+                    state["daily"]["w_afternoon"] = state["daily"].get("w_afternoon", 0) + 1
                 ctx["alerts"].append(doc["name"])
                 log("RESULT ALERT_SENT doctor=%s remainnum=%s" % (doc["name"], remain))
             else:
@@ -305,6 +314,35 @@ def check_doctor(doc, state, ctx):
         return
     evaluate(doc, item, state, ctx)
 
+# ---------- 保活通知（心跳）----------
+def send_heartbeat(state, ctx, which):
+    if which == "noon":
+        label, cnt = "上午 (00:00–11:59)", state["daily"].get("w_morning", 0)
+        title = "【平安简报】中午监测正常"
+    else:
+        label, cnt = "下午 (12:00–17:59)", state["daily"].get("w_afternoon", 0)
+        title = "【平安简报】傍晚监测正常"
+    lines = [
+        "**华山抢号监测器 · 存活确认 ✅**",
+        "",
+        "监测时段：%s" % label,
+        "本时段放号提醒：**%d 次**" % cnt,
+    ]
+    if cnt == 0:
+        lines += ["→ 暂未监测到可约号源（齐思思/周丽诺 浦东院区）。",
+                  "→ 收到此条即说明系统正常在跑；号源出现会另发推送。"]
+    else:
+        lines += ["→ 已有 %d 次放号提醒，请查收微信历史并尽快抢号。" % cnt]
+    lines += ["", "系统每 5 分钟持续监测，无需手动。",
+              "⚠️ 若您**未收到此条**，说明监测器可能断联，请检查 GitHub Actions 运行状态。"]
+    desp = "\n".join(lines)
+    if ctx["skip_push"]:
+        log("[SKIP_PUSH] 心跳(%s): %s" % (which, title))
+        return True
+    ok, pdet = push_with_retry(title, desp, ctx["sendkey"])
+    log("心跳推送%s (%s)" % ("成功" if ok else "失败", pdet))
+    return ok
+
 # ---------- 主流程 ----------
 def main():
     sendkey = os.environ.get("SERVERCHAN_SENDKEY", "").strip()
@@ -336,6 +374,16 @@ def main():
             ctx["forced"] = False
         else:
             check_doctor(doc, state, ctx)
+
+    # 保活通知：北京时间 12:00 前后报上午、18:00 前后报下午（收到=存活，未收到=断联）
+    _now = now_bjt()
+    _d = state["daily"]
+    if _now.hour == 12 and _now.minute < 15 and not _d.get("hb_noon"):
+        if send_heartbeat(state, ctx, "noon"):
+            _d["hb_noon"] = True
+    if _now.hour == 18 and _now.minute < 15 and not _d.get("hb_evening"):
+        if send_heartbeat(state, ctx, "evening"):
+            _d["hb_evening"] = True
 
     state["last_check_ts"] = now_bjt().isoformat()
     save_state(state)
