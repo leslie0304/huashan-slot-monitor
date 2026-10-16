@@ -167,7 +167,7 @@ def default_daily():
 
 def default_state():
     return {"version": 1, "doctors": {}, "daily": default_daily(),
-            "last_check_ts": None}
+            "struct_streak": 0, "last_check_ts": None}
 
 def load_state():
     try:
@@ -176,6 +176,7 @@ def load_state():
         if not isinstance(s, dict):
             raise ValueError("state 不是 object")
         s.setdefault("doctors", {})
+        s.setdefault("struct_streak", 0)
         # 北京时间每日 0 点整体重置(集中在此处; 旧版仅在有号时才重置, 会导致无号日
         # 心跳标志永不刷新、次日不再发平安简报的 bug)
         if s.get("daily", {}).get("date") != today_str():
@@ -330,6 +331,7 @@ def evaluate(doc, item, state, ctx):
         ctx["structural"] = True
         return
     prev = dstate.get("last_remainnum", 0)
+    ctx["good"] = ctx.get("good", 0) + 1     # 本轮成功取到真实号数(用于重置结构异常连击)
     log("%s(%s): remainnum=%s (上轮=%s)" % (doc["name"], doc["section"], remain, prev))
 
     if remain > 0:
@@ -503,7 +505,7 @@ def run_once(cooldown_min=None):
         return 1
 
     ctx = {"sendkey": sendkey, "skip_push": skip_push, "forced": False,
-           "transient": False, "structural": False, "alerts": [],
+           "transient": False, "structural": False, "alerts": [], "good": 0,
            "cooldown_min": cooldown_min or COOLDOWN_MIN}
     state = load_state()
     save_state(state)                    # 确保 state.json 存在, 便于 actions/cache 保存
@@ -541,12 +543,19 @@ def run_once(cooldown_min=None):
             d["hb_evening"] = True
     maybe_eve_reminder(state, ctx, now)
 
+    # 结构性异常连击计数: 放号峰值期的瞬时超时/空响应(10-16 18:00 实测)不再一击致命,
+    # 连续 3 轮结构异常才判死(rc=3)拉响 GitHub 失败邮件哨兵; 任一轮成功取到号数即清零
+    if ctx["structural"]:
+        state["struct_streak"] = state.get("struct_streak", 0) + 1
+    elif ctx.get("good"):
+        state["struct_streak"] = 0
+    streak = state.get("struct_streak", 0)
     state["last_check_ts"] = now.isoformat()
     save_state(state)
-    log("=== 监测结束 alerts=%d daily_sent=%d/%d service=%d transient=%s structural=%s ==="
+    log("=== 监测结束 alerts=%d daily_sent=%d/%d service=%d transient=%s structural=%s streak=%d/3 ==="
         % (len(ctx["alerts"]), state["daily"].get("sent", 0), DAILY_CAP,
-           state["daily"].get("service_sent", 0), ctx["transient"], ctx["structural"]))
-    return 3 if ctx["structural"] else 0
+           state["daily"].get("service_sent", 0), ctx["transient"], ctx["structural"], streak))
+    return 3 if streak >= 3 else 0
 
 def window_follow_up():
     """放号窗口内自动进入内循环高频监测, 直到窗口结束(或保护上限)"""
