@@ -57,7 +57,9 @@ DAILY_CAP = _env_int("DAILY_PUSH_CAP", 5)          # 每日推送总上限(Serve
 # 并在 window["headsup"] 时刻发一条到点预警; window["cooldown"] 可缩短冷却(放号时号源抖动快)。
 # date 缺省=每日生效; 填 "YYYY-MM-DD" 则仅当日生效(收到预约页面的放号公告后按需添加)。
 DEFAULT_RELEASE_WINDOWS = [
-    {"start": "17:35", "end": "18:35", "interval": 60,
+    # end=18:10: 实测放号后约5分钟内号源即被抢光(2026-10-19 陛下口径),
+    # 18:10 后的残余时段交给 5 分钟网格兜底(15分钟冷却), 不再占60秒高频
+    {"start": "17:35", "end": "18:10", "interval": 60,
      "headsup": "17:55", "cooldown": 3, "label": "晚间放号窗口"},
 ]
 
