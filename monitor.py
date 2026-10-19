@@ -9,7 +9,8 @@
 运行方式: 默认单次查询; 放号窗口内自动进入内循环高频监测(由 workflow 的
          bash 循环每 5 分钟调用一次, 窗口内 monitor.py 自行以 60s/轮盯到窗口结束)
 功能   : 上升沿提醒 / 冷却 / 每日5条硬顶 / 12:00&18:00平安简报 /
-         放号窗口高频+到点预警 / 门诊前夜20:00退号候补提醒
+         放号窗口高频+到点预警 / 门诊前夜20:00退号候补提醒 /
+         前夜退号高频窗口(门诊前一晚20:00-23:30按排班自动推导)
 退出码 : 0=正常(含瞬时网络错误)  1=配置错误  3=接口结构异常(触发 GitHub 失败邮件哨兵)
 """
 import json, os, random, sys, time
@@ -73,6 +74,16 @@ def _load_release_windows():
 
 RELEASE_WINDOWS = _load_release_windows()
 
+# 门诊前夜(退号)窗口: 由 DOCTORS[*].weekdays 推导"门诊日的前一天"(周一/周三),
+# 20:00 起他人取消的次日门诊号多在此区间放出, 以内循环高频盯到 23:30。
+# weekdays: Python weekday(), 周一=0 ... 周日=6(与 DOCTORS 一致)。
+EVE_WEEKDAYS = sorted({(w - 1) % 7 for doc in DOCTORS for w in doc["weekdays"]})
+
+EVE_WINDOWS = [
+    {"start": "20:00", "end": "23:30", "interval": 180, "cooldown": 5,
+     "label": "前夜退号窗口", "weekdays": EVE_WEEKDAYS, "max_min": 220},
+]
+
 EVE_REMIND_HHMM = "20:00"          # 门诊前夜提醒时刻(北京时间)
 EVE_REMIND_SPAN_MIN = 15           # 触发窗口(分钟)
 HEADS_UP_SPAN_MIN = 10             # 到点预警触发窗口(分钟)
@@ -107,11 +118,14 @@ def in_span(dt, start, end):
 def window_active(dt, w):
     if w.get("date") and w["date"] != dt.strftime("%Y-%m-%d"):
         return False
+    wds = w.get("weekdays")
+    if wds and dt.weekday() not in wds:
+        return False
     return in_span(dt, w["start"], w["end"])
 
 def current_interval(dt):
-    """返回 (间隔秒, 命中的窗口或 None)"""
-    for w in RELEASE_WINDOWS:
+    """返回 (间隔秒, 命中的窗口或 None); 前夜退号窗口与放号窗口时段不重叠, 先后无所谓"""
+    for w in EVE_WINDOWS + RELEASE_WINDOWS:
         if window_active(dt, w):
             return int(w.get("interval", 60)), w
     return None, None
@@ -455,8 +469,7 @@ def maybe_headsup(state, ctx, now):
                 d["heads_done"].append(key)
 
 # ---------- 门诊前夜提醒（查退号/挂候补） ----------
-# 由 DOCTORS[*].weekdays 推导: 门诊日前一天 20:00 提醒
-EVE_WEEKDAYS = sorted({(w - 1) % 7 for doc in DOCTORS for w in doc["weekdays"]})
+# EVE_WEEKDAYS / EVE_WINDOWS 见上方配置区(由 DOCTORS[*].weekdays 推导)
 
 def tomorrow_clinic_doctors(now):
     tw = (now.weekday() + 1) % 7
@@ -489,7 +502,7 @@ def maybe_eve_reminder(state, ctx, now):
         "1. 打开 华山医院公众号 → 就医助手 → 门诊预约 → 「浦东院区」，刷目标医生页面：**有可约号直接约**；",
         "2. 若显示约满，立刻点「**候补**」排队——有人退号系统自动补位，无需守着刷新。",
         "",
-        "监测器仍在持续盯号，真出现可约号会立刻推送。",
+        "监测器已进入 **高频盯号模式**（今晚 20:00–23:30 约 3 分钟一轮），真出现可约号会立刻推送。",
     ]
     log("门诊前夜提醒触发(%s, %d位医生)" % (tmr_cn, len(docs)))
     if send_service(state, ctx, title, "\n".join(lines)):
@@ -558,7 +571,7 @@ def run_once(cooldown_min=None):
     return 3 if streak >= 3 else 0
 
 def window_follow_up():
-    """放号窗口内自动进入内循环高频监测, 直到窗口结束(或保护上限)"""
+    """放号/前夜退号窗口内自动进入内循环高频监测, 直到窗口结束(或保护上限)"""
     now = now_bjt()
     interval, win = current_interval(now)
     if not win:
@@ -566,16 +579,17 @@ def window_follow_up():
     end_min = _hhmm_to_min(win["end"])
     label = win.get("label", "放号窗口")
     cooldown = int(win.get("cooldown", 3))
-    log("进入放号窗口内循环(%s): %ds/轮, 冷却%dm, 至 %s" % (label, interval, cooldown, win["end"]))
+    max_min = int(win.get("max_min", MAX_WINDOW_RUN_MIN))
+    log("进入窗口内循环(%s): %ds/轮, 冷却%dm, 至 %s" % (label, interval, cooldown, win["end"]))
     t0 = time.monotonic()
     while True:
         time.sleep(interval)
         now = now_bjt()
         if now.hour * 60 + now.minute >= end_min:
-            log("放号窗口(%s)结束, 退出内循环" % label)
+            log("窗口(%s)结束, 退出内循环" % label)
             return 0
-        if (time.monotonic() - t0) / 60 >= MAX_WINDOW_RUN_MIN:
-            log("内循环超 %d 分钟保护退出" % MAX_WINDOW_RUN_MIN, "WARN")
+        if (time.monotonic() - t0) / 60 >= max_min:
+            log("内循环超 %d 分钟保护退出" % max_min, "WARN")
             return 0
         rc = run_once(cooldown_min=cooldown)
         if rc == 3:
