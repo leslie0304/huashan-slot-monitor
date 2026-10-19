@@ -10,7 +10,7 @@
          bash 循环每 5 分钟调用一次, 窗口内 monitor.py 自行以 60s/轮盯到窗口结束)
 功能   : 上升沿提醒 / 冷却 / 每日5条硬顶 / 12:00&18:00平安简报 /
          放号窗口高频+到点预警 / 门诊前夜20:00退号候补提醒 /
-         前夜退号高频窗口(门诊前一晚20:00-23:30按排班自动推导)
+         前夜退号高频窗口(门诊前一晚19:55-20:30按排班自动推导)
 退出码 : 0=正常(含瞬时网络错误)  1=配置错误  3=接口结构异常(触发 GitHub 失败邮件哨兵)
 """
 import json, os, random, sys, time
@@ -57,9 +57,10 @@ DAILY_CAP = _env_int("DAILY_PUSH_CAP", 5)          # 每日推送总上限(Serve
 # 并在 window["headsup"] 时刻发一条到点预警; window["cooldown"] 可缩短冷却(放号时号源抖动快)。
 # date 缺省=每日生效; 填 "YYYY-MM-DD" 则仅当日生效(收到预约页面的放号公告后按需添加)。
 DEFAULT_RELEASE_WINDOWS = [
-    # end=18:10: 实测放号后约5分钟内号源即被抢光(2026-10-19 陛下口径),
-    # 18:10 后的残余时段交给 5 分钟网格兜底(15分钟冷却), 不再占60秒高频
-    {"start": "17:35", "end": "18:10", "interval": 60,
+    # start=17:52: 保证任何5分钟网格相位都在18:00放号前进入内循环(窗口18分钟>网格5分钟);
+    # end=18:10: 实测放号后约5分钟内号源即被抢光(2026-10-19 陛下口径), 其后交5分钟网格兜底;
+    # 实战焦点=17:58-18:10(陛下10-19明确定)
+    {"start": "17:52", "end": "18:10", "interval": 60,
      "headsup": "17:55", "cooldown": 3, "label": "晚间放号窗口"},
 ]
 
@@ -77,13 +78,14 @@ def _load_release_windows():
 RELEASE_WINDOWS = _load_release_windows()
 
 # 门诊前夜(退号)窗口: 由 DOCTORS[*].weekdays 推导"门诊日的前一天"(周一/周三),
-# 20:00 起他人取消的次日门诊号多在此区间放出, 以内循环高频盯到 23:30。
+# 他人取消的次日门诊号多在20:00后放出且寿命仅分钟级(10-19实战), 故只盯最热半小时。
+# start=19:55: 保证任何5分钟网格相位都在20:00前进入内循环(窗口35分钟>网格5分钟)。
 # weekdays: Python weekday(), 周一=0 ... 周日=6(与 DOCTORS 一致)。
 EVE_WEEKDAYS = sorted({(w - 1) % 7 for doc in DOCTORS for w in doc["weekdays"]})
 
 EVE_WINDOWS = [
-    {"start": "20:00", "end": "23:30", "interval": 180, "cooldown": 5,
-     "label": "前夜退号窗口", "weekdays": EVE_WEEKDAYS, "max_min": 220},
+    {"start": "19:55", "end": "20:30", "interval": 60, "cooldown": 3,
+     "label": "前夜退号窗口", "weekdays": EVE_WEEKDAYS},
 ]
 
 EVE_REMIND_HHMM = "20:00"          # 门诊前夜提醒时刻(北京时间)
@@ -504,7 +506,7 @@ def maybe_eve_reminder(state, ctx, now):
         "1. 打开 华山医院公众号 → 就医助手 → 门诊预约 → 「浦东院区」，刷目标医生页面：**有可约号直接约**；",
         "2. 若显示约满，立刻点「**候补**」排队——有人退号系统自动补位，无需守着刷新。",
         "",
-        "监测器已进入 **高频盯号模式**（今晚 20:00–23:30 约 3 分钟一轮），真出现可约号会立刻推送。",
+        "监测器已进入 **高频盯号模式**（今晚 20:00–20:30 一分钟一轮），真出现可约号会立刻推送。",
     ]
     log("门诊前夜提醒触发(%s, %d位医生)" % (tmr_cn, len(docs)))
     if send_service(state, ctx, title, "\n".join(lines)):
